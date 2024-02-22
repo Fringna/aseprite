@@ -1,131 +1,125 @@
-// Desktop Integration
-// Copyright (C) 2017-2018  David Capello
-//
-// This file is released under the terms of the MIT license.
-// Read LICENSE.txt for more information.
+name: build
 
-#include "base/string.h"
-#include "base/win/registry.h"
-#include "base/win/win32_exception.h"
-#include "desktop/win/class_factory.h"
-#include "desktop/win/thumbnail_handler.h"
+on: [push, pull_request]
 
-#include <new>
+jobs:
 
-// This CLSID is defined by Windows for IThumbnailProvider implementations.
-#define THUMBNAILHANDLER_SHELL_EXTENSION_CLSID "{E357FCCD-A995-4576-B01F-234630154E96}"
+  build:
 
-// This CLSID is defined by us, and can be used to create class factory for ThumbnailHandler instances.
-#define THUMBNAILHANDLER_CLSID_STRING          "{A5E9417E-6E7A-4B2D-85A4-84E114D7A960}"
-#define THUMBNAILHANDLER_NAME_STRING           "Aseprite Thumbnail Handler"
+    runs-on: ${{ matrix.os }}
 
-using namespace desktop;
+    strategy:
 
-namespace {
+      fail-fast: false
 
-namespace Global {
-  long refCount = 0;
-  HINSTANCE hInstance = nullptr;
-  CLSID clsidThumbnailHandler;
-}
+      matrix:
 
-template<class T>
-class ClassFactoryDelegateImpl : public ClassFactoryDelegate {
-public:
-  HRESULT lockServer(const bool lock) override {
-    if (lock)
-      InterlockedIncrement(&Global::refCount);
-    else
-      InterlockedDecrement(&Global::refCount);
-    return S_OK;
-  }
-  HRESULT createInstance(REFIID riid, void** ppvObject) override {
-    return T::CreateInstance(riid, ppvObject);
-  }
-};
+        os: [windows-latest]
 
-} // anonymous namespace
+        build_type: [Release]
 
-STDAPI_(BOOL) DllMain(HINSTANCE hInstance, DWORD dwReason, void*)
-{
-  if (dwReason == DLL_PROCESS_ATTACH) {
-    CLSIDFromString(
-      base::from_utf8(THUMBNAILHANDLER_CLSID_STRING).c_str(),
-      &Global::clsidThumbnailHandler);
+        enable_ui: [on]
 
-    Global::hInstance = hInstance;
-    DisableThreadLibraryCalls(hInstance);
-  }
-  return TRUE;
-}
+        include:
 
-STDAPI DllCanUnloadNow()
-{
-  return (Global::refCount == 0) ? S_OK: S_FALSE;
-}
+          - os: windows-latest
 
-STDAPI DllGetClassObject(REFCLSID clsid, REFIID riid, void** ppv)
-{
-  HRESULT hr = CLASS_E_CLASSNOTAVAILABLE;
+            build_type: Release
 
-  if (IsEqualCLSID(clsid, Global::clsidThumbnailHandler)) {
-    ClassFactoryDelegate* delegate = new (std::nothrow)ClassFactoryDelegateImpl<ThumbnailHandler>;
-    if (!delegate)
-      return E_OUTOFMEMORY;
+            enable_ui: on
 
-    IClassFactory* classFactory = new (std::nothrow)ClassFactory(delegate);
-    if (!classFactory) {
-      delete delegate;
-      return E_OUTOFMEMORY;
-    }
+    steps:
 
-    hr = classFactory->QueryInterface(riid, ppv);
-    classFactory->Release();
-  }
+    - uses: actions/checkout@v3
 
-  return hr;
-}
+      with:
 
-STDAPI DllRegisterServer()
-{
-  WCHAR dllPath[MAX_PATH];
-  if (!GetModuleFileNameW(Global::hInstance, dllPath, sizeof(dllPath)/sizeof(dllPath[0])))
-    return HRESULT_FROM_WIN32(GetLastError());
+        submodules: 'recursive'
 
-  auto hkcu = base::hkey::current_user();
-  auto k = hkcu.create("Software\\Classes\\CLSID\\" THUMBNAILHANDLER_CLSID_STRING);
-  k.string("", THUMBNAILHANDLER_NAME_STRING);
-  k = k.create("InProcServer32");
-  k.string("", base::to_utf8(dllPath));
-  k.string("ThreadingModel", "Apartment");
+    - name: ccache
 
-  k = hkcu.create("Software\\Classes\\AsepriteFile");
-  k.create("ShellEx\\" THUMBNAILHANDLER_SHELL_EXTENSION_CLSID).string("", THUMBNAILHANDLER_CLSID_STRING);
+      uses: hendrikmuhs/ccache-action@v1
 
-  // TypeOverlay = empty string = don't show the app icon overlay in the thumbnail
-  k.string("TypeOverlay", "");
+      if: runner.os == 'Linux'
 
-  // Treatment = 2 = photo border
-  k.dword("Treatment", 2);
+      with:
 
-  return S_OK;
-}
+        key: ${{ matrix.os }}-${{ matrix.enable_ui }}
 
-STDAPI DllUnregisterServer()
-{
-  HRESULT hr = S_OK;
-  auto hkcu = base::hkey::current_user();
-  try {
-    hkcu.delete_tree("Software\\Classes\\AsepriteFile\\ShellEx\\" THUMBNAILHANDLER_SHELL_EXTENSION_CLSID);
-  }
-  catch (const base::Win32Exception& ex) {
-    hr = HRESULT_FROM_WIN32(ex.errorCode());
-  }
-  try {
-    hkcu.delete_tree("Software\\Classes\\CLSID\\" THUMBNAILHANDLER_CLSID_STRING);
-  }
-  catch (const base::Win32Exception& ex) {
-    hr = HRESULT_FROM_WIN32(ex.errorCode());
-  }
-  return hr;
-}
+    - uses: seanmiddleditch/gha-setup-ninja@master
+
+    - uses: ilammy/msvc-dev-cmd@v1
+
+      if: runner.os == 'Windows'
+
+    - name: Install Dependencies
+
+      shell: bash
+
+      run: |
+
+        if [[ "${{ runner.os }}" == "Linux" ]] ; then
+
+          sudo apt-get update -qq
+
+          sudo apt-get install -y \
+
+            libx11-dev libxcursor-dev libxi-dev
+
+        fi
+
+    - name: Generating Makefiles
+
+      shell: bash
+
+      run: |
+
+        if [[ "${{ runner.os }}" == "Windows" ]] ; then
+
+          export enable_ccache=off
+
+        else
+
+          export enable_ccache=on
+
+        fi
+
+        curl -L https://github.com/blueloveTH/aseprite/releases/download/v0.01/skia.zip --output skia.zip
+
+        7z x skia.zip
+
+        cmake -S . -B build -G Ninja \
+
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+
+          -DENABLE_UI=${{ matrix.enable_ui }} \
+
+          -DENABLE_CCACHE=$enable_ccache \
+
+          -DLAF_BACKEND=skia \
+
+          -DSKIA_DIR=./skia \
+
+          -DSKIA_LIBRARY_DIR=./skia/out/Release-x64 \
+
+          -DSKIA_LIBRARY=./skia/out/Release-x64/skia.lib
+
+    - name: Compiling
+
+      shell: bash
+
+      run: |
+
+        cd build && ninja
+
+    - uses: actions/upload-artifact@v3
+
+      with:
+
+        name: aseprite
+
+        path: |
+
+          D:/a/aseprite/aseprite/build/bin/data
+
+          D:/a/aseprite/aseprite/build/bin/aseprite.exe 作者：独立游戏杂货铺 https://www.bilibili.com/read/cv27083106/ 出处：bilibili
